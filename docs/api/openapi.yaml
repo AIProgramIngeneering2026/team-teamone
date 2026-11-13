@@ -1,0 +1,692 @@
+openapi: 3.1.0
+info:
+  title: CampusSpot API
+  version: 0.1.0
+  description: |
+    HTTP-контракт поиска и бронирования помещений (UC-01–UC-11 из Requirements.md).
+    Фоновое истечение брони и обработка обновлений календаря (UC-12) не имеют
+    клиентской HTTP-операции. UC-05 и UC-06 описаны в ответах операций бронирования.
+
+    Контракт описывает вход CampusSpot со стороны доверенного API-шлюза.
+    Шлюз аутентифицирует пользователя, удаляет все значения одноимённых входящих
+    заголовков без учёта регистра и выставляет ровно по одному X-User-Id и
+    X-User-Role из проверенной учётной записи. CampusSpot отклоняет отсутствующие,
+    неоднозначные или недопустимые значения контекста пользователя.
+    CampusSpot принимает эти заголовки только от шлюза с проверенным клиентским
+    сертификатом. Прямой клиентский доступ к CampusSpot закрыт.
+
+    Время передаётся в RFC 3339 со смещением. Интервалы полуоткрытые [start_time, end_time).
+    Даты сравниваются как моменты времени, бизнес-правила используют часы сервера.
+    Если начало не раньше окончания, API возвращает 400 VALIDATION_ERROR для end_time.
+    Ошибки HTTP-операций CampusSpot возвращаются в едином JSON-формате Error.
+    CampusSpot и шлюз выставляют Cache-Control: no-store для ответов этого API,
+    включая ошибки. Шлюз не обслуживает эти операции из общего кеша.
+security:
+  - TrustedGateway: []
+
+paths:
+  /spaces:
+    get:
+      operationId: searchSpaces
+      summary: Найти свободные помещения (UC-01)
+      description: |
+        Дата входит в start_time и end_time. В URL знак + в смещении кодируется как %2B.
+        Поиск исключает пересечения с CONFIRMED,
+        фактической занятостью USED и ремонтом. Для аудиторий учитывается учебное
+        расписание. Пустой список означает отсутствие подходящих помещений.
+        Результат поиска не резервирует слот, при создании брони доступность проверяется заново.
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/UserRole'
+        - name: category
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/SpaceCategory'
+        - name: start_time
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/Timestamp'
+        - name: end_time
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/Timestamp'
+      responses:
+        '200':
+          description: Свободные помещения на запрошенный интервал.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Space'
+              examples:
+                available:
+                  value:
+                    - {space_id: ROOM-301, category: classroom, name: Аудитория №301}
+                empty:
+                  value: []
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/AccessDenied'}
+        '503': {$ref: '#/components/responses/ScheduleUnavailable'}
+        default: {$ref: '#/components/responses/UnexpectedError'}
+
+  /jobs:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/UserRole'
+    get:
+      operationId: listUpcomingJobs
+      summary: Показать свои предстоящие брони (UC-07)
+      description: Только собственные CONFIRMED с началом позже текущего времени, по возрастанию start_time. Владелец определяется по контексту шлюза.
+      responses:
+        '200':
+          description: Предстоящие брони пользователя. При их отсутствии возвращается пустой список.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: '#/components/schemas/Job'
+                    - properties:
+                        status: {const: CONFIRMED}
+              examples:
+                upcoming:
+                  value:
+                    - {job_id: job-105, space_id: CW-10, start_time: '2026-11-20T14:00:00+05:00', end_time: '2026-11-20T16:00:00+05:00', status: CONFIRMED}
+                empty:
+                  value: []
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/AccessDenied'}
+        default: {$ref: '#/components/responses/UnexpectedError'}
+    post:
+      operationId: createJob
+      summary: Создать и подтвердить бронь (UC-02, UC-05, UC-06)
+      description: |
+        Проверки выполняются синхронно. Сервер проверяет категорию помещения, лимит
+        в 4 часа, максимум 2 активные брони (REQUESTED или CONFIRMED) и доступность.
+        Проверка лимитов, проверка пересечений с другими бронями и ремонтом и запись
+        итогового результата согласованы атомарно. Предметный отказ или исчерпание
+        попыток проверить расписание после создания заявки сохраняется как CANCELLED.
+        Успешный повтор возвращает 200 с текущим состоянием той же заявки.
+        Тело содержит только поля бронирования. Поля user_id, role и status
+        отклоняются с 400 VALIDATION_ERROR.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJob'
+            example: {space_id: CW-10, start_time: '2026-11-20T14:00:00+05:00', end_time: '2026-11-20T16:00:00+05:00'}
+      responses:
+        '200': {$ref: '#/components/responses/JobResult'}
+        '201':
+          description: Новая бронь подтверждена.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Job'
+                  - properties:
+                      status: {const: CONFIRMED}
+              examples:
+                confirmed: {$ref: '#/components/examples/ConfirmedJob'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/AccessDenied'}
+        '404': {$ref: '#/components/responses/SpaceNotFound'}
+        '409': {$ref: '#/components/responses/CreateConflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/BookingLimitExceeded'}
+        '503': {$ref: '#/components/responses/ScheduleUnavailable'}
+        default: {$ref: '#/components/responses/UnexpectedError'}
+
+  /jobs/{id}/use:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/UserRole'
+      - $ref: '#/components/parameters/JobId'
+    post:
+      operationId: checkInJob
+      summary: Подтвердить явку (UC-03)
+      description: |
+        Владелец переводит CONFIRMED в USED в интервале от start_time включительно
+        до min(start_time + 15 минут, end_time) исключительно. Проверка срока и переход
+        атомарны относительно фонового истечения брони. Повтор для уже использованной
+        брони возвращает USED без повторного перехода и побочных эффектов.
+      responses:
+        '200': {$ref: '#/components/responses/UsedJob'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/AccessDenied'}
+        '404': {$ref: '#/components/responses/JobNotFound'}
+        '409': {$ref: '#/components/responses/CheckInConflict'}
+        default: {$ref: '#/components/responses/UnexpectedError'}
+
+  /jobs/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/UserRole'
+      - $ref: '#/components/parameters/JobId'
+    post:
+      operationId: cancelJob
+      summary: Отменить бронь (UC-04, UC-06)
+      description: |
+        Владелец или admin может перевести REQUESTED или CONFIRMED в CANCELLED.
+        Повтор для уже отменённой брони возвращает текущее состояние без повторного
+        изменения и уведомления. Переход из USED или EXPIRED запрещён.
+      responses:
+        '200':
+          description: Бронь отменена.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Job'
+                  - properties:
+                      status: {const: CANCELLED}
+              example: {job_id: job-105, space_id: CW-10, start_time: '2026-11-20T14:00:00+05:00', end_time: '2026-11-20T16:00:00+05:00', status: CANCELLED}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/AccessDenied'}
+        '404': {$ref: '#/components/responses/JobNotFound'}
+        '409': {$ref: '#/components/responses/InvalidStateTransition'}
+        default: {$ref: '#/components/responses/UnexpectedError'}
+
+  /jobs/{id}/reschedule:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/UserRole'
+      - $ref: '#/components/parameters/JobId'
+    patch:
+      operationId: rescheduleJob
+      summary: Перенести подтверждённую бронь (UC-08)
+      description: |
+        Владелец может перенести CONFIRMED до исходного начала. Новое начало строго
+        позже текущего времени. Помещение, job_id и статус сохраняются. При проверке
+        пересечений исходная бронь исключается. Проверка состояния, доступности и
+        замена интервала выполняются атомарно относительно конкурирующих изменений.
+        При отказе исходный интервал сохраняется. Успешный повтор возвращает результат
+        первого переноса.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Interval'}
+      responses:
+        '200':
+          description: Бронь перенесена. Статус остаётся CONFIRMED.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Job'
+                  - properties:
+                      status: {const: CONFIRMED}
+              example: {job_id: job-105, space_id: CW-10, start_time: '2026-11-20T14:30:00+05:00', end_time: '2026-11-20T15:30:00+05:00', status: CONFIRMED}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/AccessDenied'}
+        '404': {$ref: '#/components/responses/JobNotFound'}
+        '409': {$ref: '#/components/responses/ChangeConflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/InvalidBookingTime'}
+        '503': {$ref: '#/components/responses/ScheduleUnavailable'}
+        default: {$ref: '#/components/responses/UnexpectedError'}
+
+  /jobs/{id}/extend:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/UserRole'
+      - $ref: '#/components/parameters/JobId'
+    post:
+      operationId: extendJob
+      summary: Продлить текущую встречу (UC-09)
+      description: |
+        Только владелец текущей USED может продлить её до планового окончания, пока
+        помещение ещё не освобождено. Новый конец должен быть позже прежнего.
+        Проверяется дополнительный интервал. Лимит 4 часа считается от исходного начала.
+        Проверка дополнительного интервала и изменение конца выполняются атомарно
+        относительно других изменений брони и её досрочного освобождения.
+        При отказе прежнее время окончания сохраняется. Успешный повтор возвращает
+        результат первого продления.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [end_time]
+              properties:
+                end_time: {$ref: '#/components/schemas/Timestamp'}
+            example: {end_time: '2026-11-20T16:30:00+05:00'}
+      responses:
+        '200': {$ref: '#/components/responses/UsedJob'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/AccessDenied'}
+        '404': {$ref: '#/components/responses/JobNotFound'}
+        '409': {$ref: '#/components/responses/ChangeConflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/InvalidExtensionTime'}
+        '503': {$ref: '#/components/responses/ScheduleUnavailable'}
+        default: {$ref: '#/components/responses/UnexpectedError'}
+
+  /jobs/{id}/release:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/UserRole'
+      - $ref: '#/components/parameters/JobId'
+    post:
+      operationId: releaseJob
+      summary: Досрочно освободить помещение (UC-10)
+      description: |
+        Владелец текущей USED может завершить встречу до планового конца. Сервис
+        фиксирует actual_end_time по своим часам, сохраняя end_time и USED.
+        Повтор возвращает первоначальный actual_end_time, даже после планового конца.
+      responses:
+        '200':
+          description: Фактический конец зафиксирован. Статус остаётся USED.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Job'
+                  - required: [actual_end_time]
+                    properties:
+                      status: {const: USED}
+              example: {job_id: job-105, space_id: CW-10, start_time: '2026-11-20T14:00:00+05:00', end_time: '2026-11-20T16:00:00+05:00', actual_end_time: '2026-11-20T15:10:00+05:00', status: USED}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/AccessDenied'}
+        '404': {$ref: '#/components/responses/JobNotFound'}
+        '409': {$ref: '#/components/responses/InvalidStateTransition'}
+        default: {$ref: '#/components/responses/UnexpectedError'}
+
+  /spaces/{id}/maintenance:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/UserRole'
+      - name: id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Identifier'}
+    post:
+      operationId: createMaintenance
+      summary: Закрыть помещение на ремонт (UC-11)
+      description: |
+        Доступно только admin. Закрытие блокирует новые брони на пересекающийся
+        интервал. Запись закрытия согласуется с конкурентными созданием, переносом и
+        продлением брони. Статусы существующих броней сохраняются. Ответ отдельно показывает
+        предстоящие CONFIRMED и текущие USED, пересекающиеся с закрытием.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MaintenanceRequest'}
+            example: {start_time: '2026-11-20T15:00:00+05:00', end_time: '2026-11-20T17:00:00+05:00', reason: Ремонт вентиляции}
+      responses:
+        '201':
+          description: Закрытие зарегистрировано.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MaintenanceResult'}
+              example:
+                maintenance_id: maintenance-12
+                space_id: ROOM-301
+                start_time: '2026-11-20T15:00:00+05:00'
+                end_time: '2026-11-20T17:00:00+05:00'
+                reason: Ремонт вентиляции
+                affected_confirmed_jobs:
+                  - {job_id: job-207, space_id: ROOM-301, start_time: '2026-11-20T16:00:00+05:00', end_time: '2026-11-20T17:00:00+05:00', status: CONFIRMED}
+                affected_in_progress_jobs: []
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/AccessDenied'}
+        '404': {$ref: '#/components/responses/SpaceNotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        default: {$ref: '#/components/responses/UnexpectedError'}
+
+components:
+  headers:
+    NoStore:
+      description: Ответ нельзя сохранять в кеше.
+      required: true
+      schema: {type: string, const: no-store}
+  securitySchemes:
+    TrustedGateway:
+      type: mutualTLS
+      description: Сертификат должен идентифицировать доверенный API-шлюз CampusSpot.
+  parameters:
+    UserId:
+      name: X-User-Id
+      in: header
+      required: true
+      description: Идентификатор пользователя, установленный доверенным шлюзом.
+      schema: {$ref: '#/components/schemas/Identifier'}
+    UserRole:
+      name: X-User-Role
+      in: header
+      required: true
+      description: Роль пользователя, установленная доверенным шлюзом.
+      schema:
+        type: string
+        enum: [student, group_lead, teacher, special_staff, admin]
+    JobId:
+      name: id
+      in: path
+      required: true
+      description: Идентификатор брони.
+      schema: {$ref: '#/components/schemas/Identifier'}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Один ключ на намерение пользователя. При потере ответа повторите запрос с тем же ключом.
+        Ключ уникален в пределах пользователя. Отпечаток включает операцию, идентификатор
+        целевого ресурса и нормализованные параметры, включая время как момент UTC.
+        Повтор с другим отпечатком получает
+        409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH. Одновременный повтор с тем же отпечатком
+        ожидает исходного результата в пределах срока обработки запроса либо получает
+        409 IDEMPOTENCY_REQUEST_IN_PROGRESS и может повторить запрос с тем же ключом.
+        Проверка полномочий обязательна до выдачи сохранённого ответа или результата
+        поиска ключа. Запись ключа и итог операции фиксируются в одной транзакции.
+        Сохранённый окончательный отказ воспроизводится. Сбой до фиксации результата
+        допускает повтор обработки с тем же ключом.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: '^[A-Za-z0-9._~-]+$'
+      example: req-001
+
+  schemas:
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 128
+    Timestamp:
+      type: string
+      format: date-time
+      description: Метка времени RFC 3339 с Z или явным смещением от UTC.
+      example: '2026-11-20T14:00:00+05:00'
+    SpaceCategory:
+      type: string
+      enum: [coworking, project_zone, classroom, lab, conference_hall]
+    Space:
+      type: object
+      additionalProperties: false
+      required: [space_id, category, name]
+      properties:
+        space_id: {$ref: '#/components/schemas/Identifier'}
+        category: {$ref: '#/components/schemas/SpaceCategory'}
+        name: {type: string, minLength: 1}
+    IntervalFields:
+      type: object
+      description: Начало интервала должно быть строго раньше окончания.
+      required: [start_time, end_time]
+      properties:
+        start_time: {$ref: '#/components/schemas/Timestamp'}
+        end_time: {$ref: '#/components/schemas/Timestamp'}
+    Interval:
+      $ref: '#/components/schemas/IntervalFields'
+      unevaluatedProperties: false
+    CreateJob:
+      $ref: '#/components/schemas/IntervalFields'
+      required: [space_id]
+      properties:
+        space_id: {$ref: '#/components/schemas/Identifier'}
+      unevaluatedProperties: false
+    JobStatus:
+      type: string
+      enum: [REQUESTED, CONFIRMED, USED, CANCELLED, EXPIRED]
+    Job:
+      $ref: '#/components/schemas/IntervalFields'
+      unevaluatedProperties: false
+      required: [job_id, space_id, status]
+      properties:
+        job_id: {$ref: '#/components/schemas/Identifier'}
+        space_id: {$ref: '#/components/schemas/Identifier'}
+        status: {$ref: '#/components/schemas/JobStatus'}
+        actual_end_time:
+          $ref: '#/components/schemas/Timestamp'
+          description: Присутствует после досрочного освобождения.
+    MaintenanceRequest:
+      $ref: '#/components/schemas/IntervalFields'
+      required: [reason]
+      properties:
+        reason: {type: string, minLength: 1, maxLength: 500}
+      unevaluatedProperties: false
+    MaintenanceResult:
+      $ref: '#/components/schemas/IntervalFields'
+      type: object
+      unevaluatedProperties: false
+      required: [maintenance_id, space_id, reason, affected_confirmed_jobs, affected_in_progress_jobs]
+      properties:
+        maintenance_id: {$ref: '#/components/schemas/Identifier'}
+        space_id: {$ref: '#/components/schemas/Identifier'}
+        reason: {type: string, minLength: 1, maxLength: 500}
+        affected_confirmed_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
+            properties:
+              status: {const: CONFIRMED}
+        affected_in_progress_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
+            properties:
+              status: {const: USED}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, correlation_id]
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]*$'
+          description: Машинный код ошибки. Клиент принимает решения по этому полю.
+        message:
+          type: string
+          minLength: 1
+          description: Понятное описание без внутренних деталей или данных других пользователей.
+        correlation_id:
+          $ref: '#/components/schemas/Identifier'
+          description: Идентификатор запроса для поиска в журналах.
+        errors:
+          type: array
+          minItems: 1
+          description: Уточнения для ошибок полей. Может отсутствовать у общих предметных ошибок.
+          items:
+            type: object
+            additionalProperties: false
+            required: [in, field, message]
+            properties:
+              in: {type: string, enum: [body, query, path, header]}
+              field:
+                type: string
+                description: JSON Pointer для body (пустая строка для всего тела) или имя параметра.
+              message: {type: string, minLength: 1}
+      if:
+        properties:
+          code: {enum: [VALIDATION_ERROR, INVALID_NEW_TIME]}
+      then:
+        required: [errors]
+
+  responses:
+    JobResult:
+      description: Текущее состояние ранее созданной заявки при успешном повторе.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Job'}
+          examples:
+            confirmed: {$ref: '#/components/examples/ConfirmedJob'}
+    UsedJob:
+      description: Текущее использование подтверждено или продлено. Статус USED.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Job'
+            properties:
+              status: {const: USED}
+          example: {job_id: job-105, space_id: CW-10, start_time: '2026-11-20T14:00:00+05:00', end_time: '2026-11-20T16:30:00+05:00', status: USED}
+    BadRequest:
+      description: Некорректный запрос (VALIDATION_ERROR), включая отсутствующий или недопустимый Idempotency-Key.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            invalidInterval:
+              value:
+                code: VALIDATION_ERROR
+                message: Проверьте параметры интервала.
+                correlation_id: req-41
+                errors:
+                  - {in: body, field: /end_time, message: Окончание должно быть позже начала.}
+            missingIdempotencyKey:
+              value:
+                code: VALIDATION_ERROR
+                message: Отсутствует обязательный заголовок.
+                correlation_id: req-42
+                errors:
+                  - {in: header, field: Idempotency-Key, message: Передайте ключ идемпотентности.}
+    AccessDenied:
+      description: ACCESS_DENIED — нет проверенного контекста пользователя или роль не позволяет выполнить операцию.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {code: ACCESS_DENIED, message: Операция недоступна для текущей роли., correlation_id: req-43}
+    JobNotFound:
+      description: JOB_NOT_FOUND — бронь отсутствует или недоступна пользователю. Код и сообщение одинаковы в обоих случаях.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {code: JOB_NOT_FOUND, message: Бронь не найдена., correlation_id: req-44}
+    SpaceNotFound:
+      description: SPACE_NOT_FOUND — помещение с указанным идентификатором отсутствует.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {code: SPACE_NOT_FOUND, message: Помещение не найдено., correlation_id: req-45}
+    CreateConflict:
+      description: Помещение занято или закрыто на ремонт, либо возник конфликт ключа идемпотентности.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            occupied: {$ref: '#/components/examples/SpaceUnavailable'}
+            maintenance: {$ref: '#/components/examples/SpaceUnderMaintenance'}
+            keyMismatch: {$ref: '#/components/examples/IdempotencyMismatch'}
+            inProgress: {$ref: '#/components/examples/IdempotencyInProgress'}
+    ChangeConflict:
+      description: Помещение недоступно, состояние не позволяет изменить бронь или возник конфликт ключа идемпотентности.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            occupied: {$ref: '#/components/examples/SpaceUnavailable'}
+            maintenance: {$ref: '#/components/examples/SpaceUnderMaintenance'}
+            state: {$ref: '#/components/examples/InvalidStateTransition'}
+            keyMismatch: {$ref: '#/components/examples/IdempotencyMismatch'}
+            inProgress: {$ref: '#/components/examples/IdempotencyInProgress'}
+    CheckInConflict:
+      description: Текущий статус не допускает явку или запрос поступил за пределами окна явки.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            state: {$ref: '#/components/examples/InvalidStateTransition'}
+            outsideWindow:
+              value: {code: CHECK_IN_WINDOW_CLOSED, message: Сейчас подтвердить явку нельзя., correlation_id: req-48}
+    InvalidStateTransition:
+      description: INVALID_STATE_TRANSITION — состояние заявки не допускает операцию.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            state: {$ref: '#/components/examples/InvalidStateTransition'}
+    BookingLimitExceeded:
+      description: BOOKING_LIMIT_EXCEEDED — превышена допустимая длительность или число активных броней.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            limit: {$ref: '#/components/examples/BookingLimit'}
+    InvalidBookingTime:
+      description: Новый интервал нарушает правило времени или превышает допустимую длительность.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            limit: {$ref: '#/components/examples/BookingLimit'}
+            invalidNewTime:
+              value:
+                code: INVALID_NEW_TIME
+                message: Новое время недопустимо.
+                correlation_id: req-49
+                errors:
+                  - {in: body, field: /start_time, message: Новое начало должно быть в будущем.}
+    InvalidExtensionTime:
+      description: Новый конец не позже прежнего или продолжительность превышает лимит.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            limit: {$ref: '#/components/examples/BookingLimit'}
+            invalidNewTime:
+              value:
+                code: INVALID_NEW_TIME
+                message: Новое время окончания недопустимо.
+                correlation_id: req-61
+                errors:
+                  - {in: body, field: /end_time, message: Новый конец должен быть позже прежнего.}
+    UnsupportedMediaType:
+      description: UNSUPPORTED_MEDIA_TYPE — операция принимает тело в application/json.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {code: UNSUPPORTED_MEDIA_TYPE, message: Используйте application/json., correlation_id: req-50}
+    ScheduleUnavailable:
+      description: |
+        Проверка учебного расписания недоступна после попыток адаптера. Для поиска
+        отсутствие данных не трактуется как свободный слот. Создание не подтверждается.
+        При переносе или продлении прежний интервал сохраняется.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            timeout:
+              value: {code: EXTERNAL_SCHEDULE_TIMEOUT, message: Сервис расписания не ответил вовремя., correlation_id: req-51}
+            malformed:
+              value: {code: EXTERNAL_SCHEDULE_BAD_RESPONSE, message: Не удалось проверить расписание., correlation_id: req-52}
+            unavailable:
+              value: {code: EXTERNAL_SCHEDULE_UNAVAILABLE, message: Сервис расписания недоступен., correlation_id: req-53}
+    UnexpectedError:
+      description: Прочие ошибки, включая 500 INTERNAL_ERROR. Технические подробности доступны в журнале по correlation_id.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {code: INTERNAL_ERROR, message: Не удалось обработать запрос., correlation_id: req-54}
+
+  examples:
+    ConfirmedJob:
+      value: {job_id: job-105, space_id: CW-10, start_time: '2026-11-20T14:00:00+05:00', end_time: '2026-11-20T16:00:00+05:00', status: CONFIRMED}
+    SpaceUnavailable:
+      value: {code: SPACE_UNAVAILABLE, message: Помещение занято в выбранный интервал., correlation_id: req-55}
+    SpaceUnderMaintenance:
+      value: {code: SPACE_UNAVAILABLE_DUE_TO_MAINTENANCE, message: Помещение закрыто на ремонт., correlation_id: req-56}
+    IdempotencyMismatch:
+      value: {code: IDEMPOTENCY_KEY_PAYLOAD_MISMATCH, message: Этот ключ использован для другого запроса., correlation_id: req-57}
+    IdempotencyInProgress:
+      value: {code: IDEMPOTENCY_REQUEST_IN_PROGRESS, message: Запрос с этим ключом ещё выполняется., correlation_id: req-58}
+    InvalidStateTransition:
+      value: {code: INVALID_STATE_TRANSITION, message: Состояние брони не допускает операцию., correlation_id: req-59}
+    BookingLimit:
+      value: {code: BOOKING_LIMIT_EXCEEDED, message: Превышен лимит бронирования., correlation_id: req-60}
