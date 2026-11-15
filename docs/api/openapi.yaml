@@ -573,7 +573,12 @@ components:
                 errors:
                   - {in: header, field: Idempotency-Key, message: Передайте ключ идемпотентности.}
     AccessDenied:
-      description: ACCESS_DENIED — нет проверенного контекста пользователя или роль не позволяет выполнить операцию.
+      description: |
+        ACCESS_DENIED возвращается, если контекст пользователя от шлюза отсутствует
+        или некорректен, либо роль запрещает операцию или бронирование категории
+        помещения. Например, только admin может зарегистрировать обслуживание,
+        а роль student не может забронировать лабораторию (lab).
+        Для запроса к чужой брони с проверенным контекстом действует правило JobNotFound.
       headers:
         Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
@@ -581,7 +586,11 @@ components:
           schema: {$ref: '#/components/schemas/Error'}
           example: {code: ACCESS_DENIED, message: Операция недоступна для текущей роли., correlation_id: req-43}
     JobNotFound:
-      description: JOB_NOT_FOUND — бронь отсутствует или недоступна пользователю. Код и сообщение одинаковы в обоих случаях.
+      description: |
+        В операциях /jobs/{id}/* при проверенном контексте пользователя JOB_NOT_FOUND
+        возвращается, если бронь отсутствует или принадлежит другому пользователю.
+        Код и сообщение одинаковы в обоих случаях. В cancelJob роль admin может
+        отменить чужую бронь. Для отсутствующей брони эта операция возвращает тот же 404.
       headers:
         Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
