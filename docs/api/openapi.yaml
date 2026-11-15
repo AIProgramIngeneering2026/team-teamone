@@ -56,6 +56,8 @@ paths:
       responses:
         '200':
           description: Свободные помещения на запрошенный интервал.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
           content:
             application/json:
               schema:
@@ -129,6 +131,8 @@ paths:
         '200': {$ref: '#/components/responses/JobResult'}
         '201':
           description: Новая бронь подтверждена.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
           content:
             application/json:
               schema:
@@ -183,6 +187,8 @@ paths:
       responses:
         '200':
           description: Бронь отменена.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
           content:
             application/json:
               schema:
@@ -222,6 +228,8 @@ paths:
       responses:
         '200':
           description: Бронь перенесена. Статус остаётся CONFIRMED.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
           content:
             application/json:
               schema:
@@ -294,6 +302,8 @@ paths:
       responses:
         '200':
           description: Фактический конец зафиксирован. Статус остаётся USED.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
           content:
             application/json:
               schema:
@@ -334,6 +344,8 @@ paths:
       responses:
         '201':
           description: Закрытие зарегистрировано.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/MaintenanceResult'}
@@ -523,6 +535,8 @@ components:
   responses:
     JobResult:
       description: Текущее состояние ранее созданной заявки при успешном повторе.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Job'}
@@ -530,6 +544,8 @@ components:
             confirmed: {$ref: '#/components/examples/ConfirmedJob'}
     UsedJob:
       description: Текущее использование подтверждено или продлено. Статус USED.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema:
@@ -539,6 +555,8 @@ components:
           example: {job_id: job-105, space_id: CW-10, start_time: '2026-11-20T14:00:00+05:00', end_time: '2026-11-20T16:30:00+05:00', status: USED}
     BadRequest:
       description: Некорректный запрос (VALIDATION_ERROR), включая отсутствующий или недопустимый Idempotency-Key.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -559,24 +577,32 @@ components:
                   - {in: header, field: Idempotency-Key, message: Передайте ключ идемпотентности.}
     AccessDenied:
       description: ACCESS_DENIED — нет проверенного контекста пользователя или роль не позволяет выполнить операцию.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
           example: {code: ACCESS_DENIED, message: Операция недоступна для текущей роли., correlation_id: req-43}
     JobNotFound:
       description: JOB_NOT_FOUND — бронь отсутствует или недоступна пользователю. Код и сообщение одинаковы в обоих случаях.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
           example: {code: JOB_NOT_FOUND, message: Бронь не найдена., correlation_id: req-44}
     SpaceNotFound:
       description: SPACE_NOT_FOUND — помещение с указанным идентификатором отсутствует.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
           example: {code: SPACE_NOT_FOUND, message: Помещение не найдено., correlation_id: req-45}
     CreateConflict:
       description: Помещение занято или закрыто на ремонт, либо возник конфликт ключа идемпотентности.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -587,6 +613,8 @@ components:
             inProgress: {$ref: '#/components/examples/IdempotencyInProgress'}
     ChangeConflict:
       description: Помещение недоступно, состояние не позволяет изменить бронь или возник конфликт ключа идемпотентности.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -598,6 +626,8 @@ components:
             inProgress: {$ref: '#/components/examples/IdempotencyInProgress'}
     CheckInConflict:
       description: Текущий статус не допускает явку или запрос поступил за пределами окна явки.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -607,6 +637,8 @@ components:
               value: {code: CHECK_IN_WINDOW_CLOSED, message: Сейчас подтвердить явку нельзя., correlation_id: req-48}
     InvalidStateTransition:
       description: INVALID_STATE_TRANSITION — состояние заявки не допускает операцию.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -614,6 +646,8 @@ components:
             state: {$ref: '#/components/examples/InvalidStateTransition'}
     BookingLimitExceeded:
       description: BOOKING_LIMIT_EXCEEDED — превышена допустимая длительность или число активных броней.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -621,6 +655,8 @@ components:
             limit: {$ref: '#/components/examples/BookingLimit'}
     InvalidBookingTime:
       description: Новый интервал нарушает правило времени или превышает допустимую длительность.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -635,6 +671,8 @@ components:
                   - {in: body, field: /start_time, message: Новое начало должно быть в будущем.}
     InvalidExtensionTime:
       description: Новый конец не позже прежнего или продолжительность превышает лимит.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -649,6 +687,8 @@ components:
                   - {in: body, field: /end_time, message: Новый конец должен быть позже прежнего.}
     UnsupportedMediaType:
       description: UNSUPPORTED_MEDIA_TYPE — операция принимает тело в application/json.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -658,6 +698,8 @@ components:
         Проверка учебного расписания недоступна после попыток адаптера. Для поиска
         отсутствие данных не трактуется как свободный слот. Создание не подтверждается.
         При переносе или продлении прежний интервал сохраняется.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -670,6 +712,8 @@ components:
               value: {code: EXTERNAL_SCHEDULE_UNAVAILABLE, message: Сервис расписания недоступен., correlation_id: req-53}
     UnexpectedError:
       description: Прочие ошибки, включая 500 INTERNAL_ERROR. Технические подробности доступны в журнале по correlation_id.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
