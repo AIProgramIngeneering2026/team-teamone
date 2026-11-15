@@ -34,6 +34,9 @@ paths:
       summary: Найти свободные помещения (UC-01)
       description: |
         Дата входит в start_time и end_time. В URL знак + в смещении кодируется как %2B.
+        Каждый из параметров start_time и end_time передаётся ровно один раз.
+        Повторяющийся параметр времени отклоняется с 400 VALIDATION_ERROR.
+        В errors[] указываются in: query и имя повторяющегося параметра в field.
         Поиск исключает пересечения с CONFIRMED,
         фактической занятостью USED и ремонтом. Для аудиторий учитывается учебное
         расписание. Пустой список означает отсутствие подходящих помещений.
@@ -73,7 +76,19 @@ paths:
                     - {space_id: ROOM-301, category: classroom, name: Аудитория №301}
                 empty:
                   value: []
-        '400': {$ref: '#/components/responses/BadRequest'}
+        '400':
+          description: Некорректные параметры поиска (VALIDATION_ERROR).
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example:
+                code: VALIDATION_ERROR
+                message: Передайте каждую границу интервала один раз.
+                correlation_id: req-61
+                errors:
+                  - {in: query, field: end_time, message: Параметр передан несколько раз.}
         '403': {$ref: '#/components/responses/AccessDenied'}
         '503': {$ref: '#/components/responses/ScheduleUnavailable'}
         default: {$ref: '#/components/responses/UnexpectedError'}
@@ -345,6 +360,18 @@ paths:
         интервал. Запись закрытия согласуется с конкурентными созданием, переносом и
         продлением брони. Статусы существующих броней сохраняются. Ответ отдельно показывает
         предстоящие CONFIRMED и текущие USED, пересекающиеся с закрытием.
+
+        Повтор с тем же ключом, id помещения и нормализованными параметрами после
+        успеха возвращает исходный 201 и сохранённое тело ответа с тем же maintenance_id
+        и исходными списками затронутых броней. Второе закрытие не создаётся.
+        Ключ, запись о закрытии и снимок ответа фиксируются в одной транзакции.
+        Для регистрации ремонта применяется подход к хранению ключа и снимка ответа
+        из [ADR-0002](../adr/0002-idempotency-protection.md#решение). Отпечаток включает
+        операцию регистрации ремонта, id помещения и нормализованные параметры тела.
+        Для согласования с операциями бронирования используется блокировка строки
+        того же помещения, описанная в [ADR-0001](../adr/0001-sync-job-execution.md#решение).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -353,7 +380,7 @@ paths:
             example: {start_time: '2026-11-20T15:00:00+05:00', end_time: '2026-11-20T17:00:00+05:00', reason: Ремонт вентиляции}
       responses:
         '201':
-          description: Закрытие зарегистрировано.
+          description: Закрытие зарегистрировано. При повторе возвращается сохранённый ответ регистрации.
           headers:
             Cache-Control: {$ref: '#/components/headers/NoStore'}
           content:
@@ -371,6 +398,16 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '403': {$ref: '#/components/responses/AccessDenied'}
         '404': {$ref: '#/components/responses/SpaceNotFound'}
+        '409':
+          description: Ключ использован для другого запроса либо запрос с этим ключом ещё выполняется.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                keyMismatch: {$ref: '#/components/examples/IdempotencyMismatch'}
+                inProgress: {$ref: '#/components/examples/IdempotencyInProgress'}
         '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMediaType'}
         default: {$ref: '#/components/responses/UnexpectedError'}
