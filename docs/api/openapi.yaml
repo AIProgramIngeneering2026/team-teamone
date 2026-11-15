@@ -19,6 +19,9 @@ info:
     Даты сравниваются как моменты времени, бизнес-правила используют часы сервера.
     Если начало не раньше окончания, API возвращает 400 VALIDATION_ERROR для end_time.
     Ошибки HTTP-операций CampusSpot возвращаются в едином JSON-формате Error.
+    Максимальный размер тела для операций с JSON-телом — 16 КиБ (16 384 байта).
+    Шлюз или HTTP-слой CampusSpot отклоняет запрос с более крупным телом до разбора
+    JSON и вызова Dispatcher, возвращая 413 PAYLOAD_TOO_LARGE.
     CampusSpot и шлюз выставляют Cache-Control: no-store для ответов этого API,
     включая ошибки. Шлюз не обслуживает эти операции из общего кеша.
 security:
@@ -150,6 +153,7 @@ paths:
         '403': {$ref: '#/components/responses/AccessDenied'}
         '404': {$ref: '#/components/responses/SpaceNotFound'}
         '409': {$ref: '#/components/responses/CreateConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMediaType'}
         '422': {$ref: '#/components/responses/BookingLimitExceeded'}
         '503': {$ref: '#/components/responses/ScheduleUnavailable'}
@@ -246,6 +250,7 @@ paths:
         '403': {$ref: '#/components/responses/AccessDenied'}
         '404': {$ref: '#/components/responses/JobNotFound'}
         '409': {$ref: '#/components/responses/ChangeConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMediaType'}
         '422': {$ref: '#/components/responses/InvalidBookingTime'}
         '503': {$ref: '#/components/responses/ScheduleUnavailable'}
@@ -286,6 +291,7 @@ paths:
         '403': {$ref: '#/components/responses/AccessDenied'}
         '404': {$ref: '#/components/responses/JobNotFound'}
         '409': {$ref: '#/components/responses/ChangeConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMediaType'}
         '422': {$ref: '#/components/responses/InvalidExtensionTime'}
         '503': {$ref: '#/components/responses/ScheduleUnavailable'}
@@ -365,6 +371,7 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '403': {$ref: '#/components/responses/AccessDenied'}
         '404': {$ref: '#/components/responses/SpaceNotFound'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMediaType'}
         default: {$ref: '#/components/responses/UnexpectedError'}
 
@@ -691,6 +698,14 @@ components:
                 correlation_id: req-61
                 errors:
                   - {in: body, field: /end_time, message: Новый конец должен быть позже прежнего.}
+    PayloadTooLarge:
+      description: PAYLOAD_TOO_LARGE — размер тела запроса превышает 16 КиБ (16 384 байта).
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {code: PAYLOAD_TOO_LARGE, message: Тело запроса превышает 16 КиБ., correlation_id: req-60}
     UnsupportedMediaType:
       description: UNSUPPORTED_MEDIA_TYPE — операция принимает тело в application/json.
       headers:
