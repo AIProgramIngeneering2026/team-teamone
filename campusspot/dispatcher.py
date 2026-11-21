@@ -1,7 +1,7 @@
 """Синхронное выполнение обязательных проверок новой брони (UC-02)."""
 
 from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Lock
 from typing import Protocol
 
@@ -29,7 +29,13 @@ def creation_params(fields: Mapping[str, object]) -> ToolParams:
     """Подготовить параметры до создания Job. Время уже разобрано вызывающим слоем."""
     def required_text(key: str) -> str:
         value = fields.get(key)
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str) or not value:
+            raise ValidationError(key)
+        return value
+
+    def identifier(key: str) -> str:
+        value = required_text(key)
+        if len(value) > 128:
             raise ValidationError(key)
         return value
 
@@ -41,7 +47,7 @@ def creation_params(fields: Mapping[str, object]) -> ToolParams:
 
     start = required_time("start_time")
     end = required_time("end_time")
-    if end <= start:
+    if end.astimezone(timezone.utc) <= start.astimezone(timezone.utc):
         raise ValidationError("end_time")
     role = required_text("role")
     if role not in {"student", "group_lead", "teacher", "special_staff", "admin"}:
@@ -50,8 +56,8 @@ def creation_params(fields: Mapping[str, object]) -> ToolParams:
     if category not in {"coworking", "project_zone", "classroom", "lab", "conference_hall"}:
         raise ValidationError("space_category")
     return ToolParams(
-        job_id=required_text("job_id"), user_id=required_text("user_id"),
-        role=role, space_id=required_text("space_id"),
+        job_id=identifier("job_id"), user_id=identifier("user_id"),
+        role=role, space_id=identifier("space_id"),
         space_category=category, start_time=start,
         end_time=end, extra={"operation": "create"},
     )

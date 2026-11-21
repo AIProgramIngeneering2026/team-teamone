@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Event
 from unittest.mock import Mock
 
-from campusspot.dispatcher import Dispatcher, DispatchInProgress, ValidationError
+from campusspot.dispatcher import Dispatcher, DispatchInProgress, ValidationError, creation_params
 from campusspot.tool_contract import ToolResult
 
 
@@ -105,7 +105,7 @@ class DispatcherTests(unittest.TestCase):
                     self.dispatcher.create(data, self.new_job)
                 self.assertEqual((caught.exception.code, caught.exception.field),
                                  ("VALIDATION_ERROR", field))
-        for field, value in (("role", 42), ("role", "unknown"), ("space_id", " "),
+        for field, value in (("role", 42), ("role", "unknown"), ("space_id", ""),
                              ("space_category", "unknown"),
                              ("start_time", "tomorrow"), ("end_time", self.fields["start_time"])):
             with self.subTest(field=field, value=value):
@@ -114,6 +114,27 @@ class DispatcherTests(unittest.TestCase):
                 self.assertEqual(caught.exception.field, field)
         self.new_job.assert_not_called()
         self.assertEqual(self.calls, [])
+
+    def test_identifier_length_matches_openapi(self):
+        for field in ("job_id", "user_id", "space_id"):
+            with self.subTest(field=field):
+                value = "я" * 128
+                params = creation_params(self.fields | {field: value})
+                self.assertEqual(getattr(params, field), value)
+                with self.assertRaises(ValidationError) as caught:
+                    self.dispatcher.create(self.fields | {field: value + "я"}, self.new_job)
+                self.assertEqual(caught.exception.field, field)
+        self.new_job.assert_not_called()
+
+    def test_interval_uses_instants_and_requires_offset(self):
+        start = self.fields["start_time"]
+        same_instant = start.astimezone(timezone(timedelta(hours=5)))
+        for end in (same_instant, start.replace(tzinfo=None)):
+            with self.assertRaises(ValidationError) as caught:
+                creation_params(self.fields | {"end_time": end})
+            self.assertEqual(caught.exception.field, "end_time")
+        end = (start + timedelta(minutes=1)).astimezone(timezone(timedelta(hours=-5)))
+        self.assertEqual(creation_params(self.fields | {"end_time": end}).end_time, end)
 
     def test_concurrent_dispatchers_run_one_chain(self):
         entered, release = Event(), Event()
