@@ -170,7 +170,7 @@ paths:
         '409': {$ref: '#/components/responses/CreateConflict'}
         '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMediaType'}
-        '422': {$ref: '#/components/responses/BookingLimitExceeded'}
+        '422': {$ref: '#/components/responses/InvalidBookingTime'}
         '503': {$ref: '#/components/responses/ScheduleUnavailable'}
         default: {$ref: '#/components/responses/UnexpectedError'}
 
