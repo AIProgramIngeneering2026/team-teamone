@@ -43,10 +43,16 @@ def creation_params(fields: Mapping[str, object]) -> ToolParams:
     end = required_time("end_time")
     if end <= start:
         raise ValidationError("end_time")
+    role = required_text("role")
+    if role not in {"student", "group_lead", "teacher", "special_staff", "admin"}:
+        raise ValidationError("role")
+    category = required_text("space_category")
+    if category not in {"coworking", "project_zone", "classroom", "lab", "conference_hall"}:
+        raise ValidationError("space_category")
     return ToolParams(
         job_id=required_text("job_id"), user_id=required_text("user_id"),
-        role=required_text("role"), space_id=required_text("space_id"),
-        space_category=required_text("space_category"), start_time=start,
+        role=role, space_id=required_text("space_id"),
+        space_category=category, start_time=start,
         end_time=end, extra={"operation": "create"},
     )
 
@@ -68,42 +74,42 @@ class Dispatcher:
             raise ValueError("Список обязательных проверок пуст")
 
     def create(
-        self, fields: Mapping[str, object], new_job: Callable[[ToolParams], BookingJob]
+        self, fields: Mapping[str, object], get_or_create_job: Callable[[ToolParams], BookingJob]
     ) -> BookingJob:
+        """Хранилище возвращает тот же Job при повторе job_id."""
         params = creation_params(fields)
-        # Неверная конфигурация Registry не должна оставить новую бронь в REQUESTED.
-        tools = [self._resolve(name) for name in self._checks]
-        job = new_job(params)
-        self._run(job, params, tools)
-        return job
-
-    def _run(self, job: BookingJob, params: ToolParams, tools: list[Tool]) -> None:
-        if params.job_id != job.job_id:
-            raise ValidationError("job_id")
         with _guard:
-            if job.job_id in _active:
-                raise DispatchInProgress(job.job_id)
-            if job.status != "REQUESTED":
-                return
-            _active.add(job.job_id)
+            if params.job_id in _active:
+                raise DispatchInProgress(params.job_id)
+            _active.add(params.job_id)
         try:
-            history = []
-            for tool in tools:
-                try:
-                    result = tool.execute(params)
-                except Exception as exc:
-                    failure = ToolResult(
-                        passed=False, tool_name=tool.name,
-                        error_code=getattr(exc, "code", None) or type(exc).__name__,
-                        message=str(exc),
-                    )
-                    job.transition("CANCELLED", checks=(*history, failure))
-                    raise
-                history.append(result)
-                if not result.passed:
-                    job.transition("CANCELLED", checks=tuple(history))
-                    return
-            job.transition("CONFIRMED", checks=tuple(history))
+            # Проверяем конфигурацию до создания новой брони.
+            tools = [self._resolve(name) for name in self._checks]
+            job = get_or_create_job(params)
+            if job.job_id != params.job_id:
+                raise ValidationError("job_id")
+            if job.status == "REQUESTED":
+                self._run(job, params, tools)
+            return job
         finally:
             with _guard:
-                _active.remove(job.job_id)
+                _active.remove(params.job_id)
+
+    def _run(self, job: BookingJob, params: ToolParams, tools: list[Tool]) -> None:
+        history = []
+        for tool in tools:
+            try:
+                result = tool.execute(params)
+            except Exception as exc:
+                failure = ToolResult(
+                    passed=False, tool_name=tool.name,
+                    error_code=getattr(exc, "code", None) or type(exc).__name__,
+                    message=str(exc),
+                )
+                job.transition("CANCELLED", checks=(*history, failure))
+                raise
+            history.append(result)
+            if not result.passed:
+                job.transition("CANCELLED", checks=tuple(history))
+                return
+        job.transition("CONFIRMED", checks=tuple(history))

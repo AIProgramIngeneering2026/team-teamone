@@ -105,7 +105,8 @@ class DispatcherTests(unittest.TestCase):
                     self.dispatcher.create(data, self.new_job)
                 self.assertEqual((caught.exception.code, caught.exception.field),
                                  ("VALIDATION_ERROR", field))
-        for field, value in (("role", 42), ("space_id", " "),
+        for field, value in (("role", 42), ("role", "unknown"), ("space_id", " "),
+                             ("space_category", "unknown"),
                              ("start_time", "tomorrow"), ("end_time", self.fields["start_time"])):
             with self.subTest(field=field, value=value):
                 with self.assertRaises(ValidationError) as caught:
@@ -135,4 +136,5 @@ class DispatcherTests(unittest.TestCase):
                 release.set()
             self.assertIs(first.result(timeout=5), self.job)
         self.tools["rights"].execute.assert_called_once()
+        self.new_job.assert_called_once()
         self.assertEqual(self.job.status, "CONFIRMED")
