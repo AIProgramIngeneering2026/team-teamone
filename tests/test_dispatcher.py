@@ -5,11 +5,8 @@ from threading import Event
 from unittest.mock import Mock
 
 from campusspot.dispatcher import Dispatcher, DispatchInProgress, ValidationError, creation_params
+from campusspot.registry import Registry, UnknownOperation
 from campusspot.tool_contract import ToolResult
-
-
-class UnknownOperation(LookupError):
-    code = "UNKNOWN_OPERATION"
 
 
 class Job:
@@ -37,14 +34,10 @@ class DispatcherTests(unittest.TestCase):
             tool.name = name
             tool.execute.side_effect = self.success(name)
             self.tools[name] = tool
-        self.dispatcher = Dispatcher(self.resolve, self.tools)
+        self.registry = Registry(self.tools)
+        self.dispatcher = Dispatcher(self.registry.resolve, self.tools)
         self.job = Job("job-1")
         self.new_job = Mock(return_value=self.job)
-
-    def resolve(self, name):
-        if name not in self.tools:
-            raise UnknownOperation(name)
-        return self.tools[name]
 
     def success(self, name):
         def execute(params):
@@ -89,7 +82,7 @@ class DispatcherTests(unittest.TestCase):
         self.tools["limits"].execute.assert_not_called()
 
     def test_unknown_operation_precedes_job_creation_and_execution(self):
-        del self.tools["limits"]
+        self.dispatcher = Dispatcher(self.registry.resolve, ("rights", "missing"))
         with self.assertRaises(UnknownOperation) as caught:
             self.dispatch()
         self.assertEqual(caught.exception.code, "UNKNOWN_OPERATION")
@@ -146,7 +139,7 @@ class DispatcherTests(unittest.TestCase):
             return ToolResult(True, "rights")
 
         self.tools["rights"].execute.side_effect = wait_for_second_call
-        other = Dispatcher(self.resolve, self.tools)
+        other = Dispatcher(self.registry.resolve, self.tools)
         with ThreadPoolExecutor(max_workers=1) as pool:
             first = pool.submit(self.dispatch)
             try:
