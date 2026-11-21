@@ -85,7 +85,12 @@ class Dispatcher:
     def create(
         self, fields: Mapping[str, object], get_or_create_job: Callable[[ToolParams], BookingJob]
     ) -> BookingJob:
-        """Хранилище возвращает тот же Job при повторе job_id."""
+        """Выполнить проверки создания брони.
+
+        Вызывающая сторона передаёт функцию get_or_create_job. По params.job_id
+        она возвращает сохранённый Job с текущим статусом и историей либо создаёт
+        и сохраняет новую бронь в REQUESTED с этим же идентификатором.
+        """
         params = creation_params(fields)
         with _guard:
             if params.job_id in _active:
