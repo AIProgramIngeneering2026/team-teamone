@@ -76,7 +76,20 @@ _guard = Lock()
 
 
 class Dispatcher:
+    """Выполняет обязательные проверки при создании брони.
+
+    Args:
+        resolve: Функция поиска Tool по имени. Передайте метод registry.resolve.
+        checks: Имена зарегистрированных проверок в порядке запуска,
+            например ("access_rights", "conflict_check").
+    """
+
     def __init__(self, resolve: Callable[[str], Tool], checks: Iterable[str]):
+        """Сохранить функцию поиска resolve и порядок вызовов из checks.
+
+        Raises:
+            ValueError: В checks не передано ни одной проверки.
+        """
         self._resolve = resolve
         self._checks = tuple(checks)
         if not self._checks:
@@ -87,9 +100,23 @@ class Dispatcher:
     ) -> BookingJob:
         """Выполнить проверки создания брони.
 
-        Вызывающая сторона передаёт функцию get_or_create_job. По params.job_id
-        она возвращает сохранённый Job с текущим статусом и историей либо создаёт
-        и сохраняет новую бронь в REQUESTED с этим же идентификатором.
+        Args:
+            fields: Словарь с job_id, user_id, role, space_id, space_category,
+                start_time и end_time. Обе даты — datetime с часовым поясом.
+            get_or_create_job: Функция, принимающая ToolParams. По params.job_id
+                возвращает сохранённую бронь либо создаёт и сохраняет новую
+                в состоянии REQUESTED с тем же идентификатором.
+
+        Returns:
+            Job после проверок. При повторе возвращается существующая бронь
+            в её текущем состоянии.
+
+        Raises:
+            ValidationError: Ошибка в полях брони или несовпадение job_id.
+            DispatchInProgress: В процессе уже выполняются проверки этой брони.
+            UnknownOperation: Registry не нашёл одну из обязательных проверок.
+
+        Если Tool выбросил исключение, после отмены брони оно передаётся вызывающему коду.
         """
         params = creation_params(fields)
         with _guard:
@@ -113,6 +140,14 @@ class Dispatcher:
                 _active.remove(params.job_id)
 
     def _run(self, job: BookingJob, params: ToolParams, tools: list[Tool]) -> None:
+        """Применить проверки к брони и передать историю в job.transition.
+
+        Args:
+            job: Бронь в состоянии REQUESTED.
+            params: Проверенные параметры этой брони для вызовов Tool.execute.
+            tools: Экземпляры Tool в порядке выполнения. Первый отказ или сбой
+                останавливает дальнейшие вызовы.
+        """
         history = []
         for tool in tools:
             try:
