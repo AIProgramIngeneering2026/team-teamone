@@ -9,6 +9,8 @@ from .tool_contract import Tool, ToolParams, ToolResult
 
 
 class BookingJob(Protocol):
+    """Часть интерфейса Job, необходимая диспетчеру для создания брони."""
+
     job_id: str
     status: str
 
@@ -67,7 +69,8 @@ class DispatchInProgress(RuntimeError):
     """Проверки этой брони уже выполняются в процессе."""
 
 
-# Разные экземпляры Dispatcher в процессе могут получить одну и ту же бронь.
+# Все диспетчеры процесса разделяют множество выполняемых job_id. Блокировка
+# защищает изменения множества, поэтому проверки разных броней могут идти параллельно.
 _active: set[str] = set()
 _guard = Lock()
 
@@ -89,11 +92,14 @@ class Dispatcher:
                 raise DispatchInProgress(params.job_id)
             _active.add(params.job_id)
         try:
-            # Проверяем конфигурацию до создания новой брони.
+            # resolve — переданный при сборке метод Registry. Ищем сразу все Tool:
+            # опечатка даже в последнем имени должна выявиться до создания Job.
             tools = [self._resolve(name) for name in self._checks]
             job = get_or_create_job(params)
             if job.job_id != params.job_id:
                 raise ValidationError("job_id")
+            # При повторе хранилище возвращает прежний Job. Его итоговый статус
+            # означает, что цепочка уже завершилась и её результат можно вернуть.
             if job.status == "REQUESTED":
                 self._run(job, params, tools)
             return job
@@ -107,6 +113,8 @@ class Dispatcher:
             try:
                 result = tool.execute(params)
             except Exception as exc:
+                # Job получает историю до сбоя включительно, а вызывающий код —
+                # исходное исключение, чтобы различать, например, таймаут и отказ.
                 failure = ToolResult(
                     passed=False, tool_name=tool.name,
                     error_code=getattr(exc, "code", None) or type(exc).__name__,

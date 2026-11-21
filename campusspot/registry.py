@@ -15,6 +15,8 @@ class UnknownOperation(LookupError):
 
 class Registry:
     def __init__(self, tools: Mapping[str, Tool]):
+        # Реестр хранит свою копию таблицы имён. Значения по-прежнему ссылаются
+        # на те же экземпляры Tool с их настроенными зависимостями.
         self._tools = dict(tools)
 
     def resolve(self, name: str) -> Tool:
