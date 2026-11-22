@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
-# Если общий модуль контракта Tool (#36) уже создан в проекте — импортируем из него,
-# иначе используем определение из docs/tool-contract.md.
+# Если общий модуль контракта Tool (#36 / #40) уже влит в main — импортируем из него,
+# иначе используем локальное определение из docs/tool-contract.md.
 try:
     from .tool_contract import Tool, ToolParams, ToolResult  # type: ignore[import-not-found]
 except ImportError:
@@ -147,27 +147,28 @@ class ConflictCheckTool:
         Проверяет отсутствие конфликтов на полуоткрытом интервале [params.start_time, params.end_time).
         Возвращает ToolResult(passed=False, error_code="SPACE_UNAVAILABLE") при пересечении.
         """
-        # 1. Проверка пересечений с учебными занятиями в том же помещении
-        for lesson in self._schedule.get_slots_for_space(params.space_id):
-            if intervals_overlap(
-                params.start_time,
-                params.end_time,
-                lesson.start_time,
-                lesson.end_time,
-            ):
-                return ToolResult(
-                    passed=False,
-                    tool_name=self.name,
-                    error_code="SPACE_UNAVAILABLE",
-                    message="Пространство занято учебным занятием в выбранный интервал времени.",
-                    details={
-                        "space_id": params.space_id,
-                        "conflict_type": "schedule",
-                        "busy_start": lesson.start_time.isoformat(),
-                        "busy_end": lesson.end_time.isoformat(),
-                        "title": lesson.title,
-                    },
-                )
+        # 1. Проверка пересечений с учебными занятиями — только для категории classroom (docs/tool-contract.md, п. 5.1)
+        if params.space_category == "classroom":
+            for lesson in self._schedule.get_slots_for_space(params.space_id):
+                if intervals_overlap(
+                    params.start_time,
+                    params.end_time,
+                    lesson.start_time,
+                    lesson.end_time,
+                ):
+                    return ToolResult(
+                        passed=False,
+                        tool_name=self.name,
+                        error_code="SPACE_UNAVAILABLE",
+                        message="Пространство занято учебным занятием в выбранный интервал времени.",
+                        details={
+                            "space_id": params.space_id,
+                            "conflict_type": "schedule",
+                            "busy_start": lesson.start_time.isoformat(),
+                            "busy_end": lesson.end_time.isoformat(),
+                            "title": lesson.title,
+                        },
+                    )
 
         # 2. Проверка пересечений с другими подтверждёнными или используемыми бронями (CONFIRMED / USED)
         for booking in self._bookings.get_bookings_for_space(params.space_id):
