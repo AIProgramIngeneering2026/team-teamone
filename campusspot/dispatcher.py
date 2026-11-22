@@ -1,6 +1,7 @@
 """Синхронное выполнение обязательных проверок новой брони (UC-02)."""
 
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Protocol
@@ -11,11 +12,24 @@ from .tool_contract import Tool, ToolParams, ToolResult
 class BookingJob(Protocol):
     """Часть интерфейса Job, необходимая диспетчеру для создания брони."""
 
-    job_id: str
-    status: str
+    @property
+    def job_id(self) -> str: ...
+
+    @property
+    def params(self) -> ToolParams: ...
+
+    @property
+    def status(self) -> str:
+        """Строковый статус модели Job (включая перечисления на базе str)."""
+        ...
 
     def transition(self, status: str, *, checks: tuple[ToolResult, ...]) -> None:
-        """Job проверяет переход и сохраняет его вместе с историей проверок."""
+        """Сохранить допустимый переход и историю атомарно.
+
+        При CONFIRMED хранилище проверяет пересечение интервалов в той же
+        транзакции, что и резервирование. Занятый слот вызывает SlotConflict
+        без изменения брони. Внешняя отмена даёт INVALID_STATE_TRANSITION.
+        """
         ...
 
 
@@ -27,11 +41,23 @@ class ValidationError(ValueError):
         super().__init__(f"Некорректное поле: {field}")
 
 
+class PayloadMismatch(ValueError):
+    code = "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH"
+
+
+class SlotConflict(Exception):
+    """Хранилище обнаружило пересечение при записи CONFIRMED."""
+
+    def __init__(self, result: ToolResult):
+        super().__init__(result.message)
+        self.result = result
+
+
 def creation_params(fields: Mapping[str, object]) -> ToolParams:
     """Подготовить параметры до создания Job. Время уже разобрано вызывающим слоем."""
     def required_text(key: str) -> str:
         value = fields.get(key)
-        if not isinstance(value, str) or not value:
+        if not isinstance(value, str) or not value.strip():
             raise ValidationError(key)
         return value
 
@@ -46,6 +72,11 @@ def creation_params(fields: Mapping[str, object]) -> ToolParams:
         if not isinstance(value, datetime) or value.utcoffset() is None:
             raise ValidationError(key)
         return value
+
+    allowed = {"job_id", "user_id", "role", "space_id", "space_category", "start_time", "end_time"}
+    for key in fields:
+        if key not in allowed:
+            raise ValidationError(key)
 
     start = required_time("start_time")
     end = required_time("end_time")
@@ -113,6 +144,7 @@ class Dispatcher:
 
         Raises:
             ValidationError: Ошибка в полях брони или несовпадение job_id.
+            PayloadMismatch: Сохранённая бронь создана с другими параметрами.
             DispatchInProgress: В процессе уже выполняются проверки этой брони.
             UnknownOperation: Registry не нашёл одну из обязательных проверок.
 
@@ -124,22 +156,23 @@ class Dispatcher:
                 raise DispatchInProgress(params.job_id)
             _active.add(params.job_id)
         try:
-            # resolve — переданный при сборке метод Registry. Ищем сразу все Tool:
-            # опечатка даже в последнем имени должна выявиться до создания Job.
-            tools = [self._resolve(name) for name in self._checks]
             job = get_or_create_job(params)
             if job.job_id != params.job_id:
                 raise ValidationError("job_id")
-            # При повторе хранилище возвращает прежний Job. Его итоговый статус
-            # означает, что цепочка уже завершилась и её результат можно вернуть.
-            if job.status == "REQUESTED":
-                self._run(job, params, tools)
+            if _utc_params(job.params) != _utc_params(params):
+                raise PayloadMismatch(params.job_id)
+            status = job.status
+            if not isinstance(status, str):
+                raise TypeError("BookingJob.status должен быть строкой")
+            if status == "REQUESTED":
+                tools = [(name, self._resolve(name)) for name in self._checks]
+                self._run(job, job.params, tools)
             return job
         finally:
             with _guard:
                 _active.remove(params.job_id)
 
-    def _run(self, job: BookingJob, params: ToolParams, tools: list[Tool]) -> None:
+    def _run(self, job: BookingJob, params: ToolParams, tools: list[tuple[str, Tool]]) -> None:
         """Применить проверки к брони и передать историю в job.transition.
 
         Args:
@@ -149,21 +182,46 @@ class Dispatcher:
                 останавливает дальнейшие вызовы.
         """
         history = []
-        for tool in tools:
+        for name, tool in tools:
+            if job.status == "CANCELLED":
+                return
             try:
                 result = tool.execute(params)
             except Exception as exc:
                 # Job получает историю до сбоя включительно, а вызывающий код —
                 # исходное исключение, чтобы различать, например, таймаут и отказ.
                 failure = ToolResult(
-                    passed=False, tool_name=tool.name,
+                    passed=False, tool_name=name,
                     error_code=getattr(exc, "code", None) or type(exc).__name__,
                     message=str(exc),
                 )
-                job.transition("CANCELLED", checks=(*history, failure))
-                raise
+                if _transition(job, "CANCELLED", (*history, failure)):
+                    raise
+                return
             history.append(result)
             if not result.passed:
-                job.transition("CANCELLED", checks=tuple(history))
+                _transition(job, "CANCELLED", tuple(history))
                 return
-        job.transition("CONFIRMED", checks=tuple(history))
+        try:
+            _transition(job, "CONFIRMED", tuple(history))
+        except SlotConflict as conflict:
+            _transition(job, "CANCELLED", (*history, conflict.result))
+
+
+def _utc_params(params: ToolParams) -> ToolParams:
+    """Сравнивать моменты времени с учётом смещения, включая повторный час осенью."""
+    return replace(params, start_time=params.start_time.astimezone(timezone.utc),
+                   end_time=params.end_time.astimezone(timezone.utc))
+
+
+def _transition(job: BookingJob, status: str, checks: tuple[ToolResult, ...]) -> bool:
+    """Вернуть False, если ручная отмена опередила результат проверки."""
+    if job.status == "CANCELLED":
+        return False
+    try:
+        job.transition(status, checks=checks)
+    except Exception as exc:
+        if getattr(exc, "code", None) == "INVALID_STATE_TRANSITION" and job.status == "CANCELLED":
+            return False
+        raise
+    return True
