@@ -1,10 +1,11 @@
 """Жизненный цикл брони и история проверок CampusSpot."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from types import MappingProxyType
+from typing import Any
 
 from .tool_contract import ToolParams, ToolResult
 
@@ -17,6 +18,21 @@ _ALLOWED_TRANSITIONS = {
     "EXPIRED": frozenset(),
 }
 _CHECK_IN_WINDOW = timedelta(minutes=15)
+
+
+def _freeze_metadata(value: Any) -> Any:
+    """Скопировать контейнеры метаданных и сделать снимок неизменяемым."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({
+            key: _freeze_metadata(item) for key, item in value.items()
+        })
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_metadata(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_metadata(item) for item in value)
+    if isinstance(value, bytearray):
+        return bytes(value)
+    return value
 
 
 class InvalidStateTransition(ValueError):
@@ -33,7 +49,7 @@ class AccessDenied(PermissionError):
 
 class Job:
     def __init__(self, params: ToolParams, *, required_checks: Iterable[str]) -> None:
-        self._params = params
+        self._params = replace(params, extra=_freeze_metadata(params.extra))
         self._required_checks = tuple(required_checks)
         if not self._required_checks:
             raise ValueError("Для подтверждения брони нужны обязательные проверки")
@@ -85,7 +101,7 @@ class Job:
                 self._validate_window(status, now)
 
             self._history += tuple(
-                replace(result, details=MappingProxyType(dict(result.details)))
+                replace(result, details=_freeze_metadata(result.details))
                 for result in checks
             )
             self._status = status

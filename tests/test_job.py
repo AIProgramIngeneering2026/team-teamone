@@ -1,8 +1,11 @@
+import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-import unittest
+from unittest.mock import Mock
 
+from campusspot.dispatcher import Dispatcher
 from campusspot.job import AccessDenied, CheckInWindowClosed, InvalidStateTransition, Job
+from campusspot.registry import Registry
 from campusspot.tool_contract import ToolParams, ToolResult
 
 
@@ -31,6 +34,62 @@ class JobTests(unittest.TestCase):
         self.job.check_in(START, user_id=PARAMS.user_id)
         self.assertEqual(self.job.status, "USED")
         self.assertEqual(self.job.history, PASSED)
+
+    def test_params_keep_an_immutable_snapshot_of_extra(self):
+        source = {
+            "operation": "extend",
+            "original_start_time": START,
+            "context": {"spaces": [{"id": PARAMS.space_id}]},
+        }
+        job = Job(replace(PARAMS, extra=source), required_checks=REQUIRED_CHECKS)
+
+        source["operation"] = "create"
+        source["context"]["spaces"][0]["id"] = "other"
+        source["context"]["spaces"].append({"id": "third"})
+
+        self.assertEqual(job.params.extra["operation"], "extend")
+        self.assertEqual(job.params.extra["original_start_time"], START)
+        spaces = job.params.extra["context"]["spaces"]
+        self.assertEqual(spaces, ({"id": PARAMS.space_id},))
+        with self.assertRaises(TypeError):
+            job.params.extra["operation"] = "reschedule"
+        with self.assertRaises(TypeError):
+            spaces[0]["id"] = "changed through Job"
+
+    def test_tool_cannot_change_saved_params_and_break_replay(self):
+        def attempt_to_mutate(params):
+            try:
+                params.extra["source"] = "tool"
+            except TypeError:
+                pass
+            return ToolResult(True, "limit_check")
+
+        checks = ("limit_check",)
+        tool = Mock()
+        tool.execute.side_effect = attempt_to_mutate
+        dispatcher = Dispatcher(Registry({"limit_check": tool}).resolve, checks)
+        jobs = {}
+
+        def get_or_create(params):
+            if params.job_id not in jobs:
+                jobs[params.job_id] = Job(params, required_checks=checks)
+            return jobs[params.job_id]
+
+        fields = {
+            "job_id": PARAMS.job_id,
+            "user_id": PARAMS.user_id,
+            "role": PARAMS.role,
+            "space_id": PARAMS.space_id,
+            "space_category": PARAMS.space_category,
+            "start_time": PARAMS.start_time,
+            "end_time": PARAMS.end_time,
+        }
+        job = dispatcher.create(fields, get_or_create)
+
+        self.assertEqual(job.status, "CONFIRMED")
+        self.assertIs(dispatcher.create(fields, get_or_create), job)
+        self.assertEqual(job.params.extra, {"operation": "create"})
+        tool.execute.assert_called_once()
 
     def test_requested_can_only_be_confirmed_or_cancelled(self):
         for status in ("REQUESTED", "USED", "EXPIRED", "UNKNOWN"):
@@ -69,6 +128,22 @@ class JobTests(unittest.TestCase):
         self.assertEqual(self.job.status, "CANCELLED")
         self.assertEqual(self.job.history[-1].error_code, "SPACE_UNAVAILABLE")
         self.assertEqual(self.job.history[-1].details, {"space_id": PARAMS.space_id})
+
+    def test_history_keeps_an_immutable_snapshot_of_nested_details(self):
+        details = {
+            "conflict": {"space_id": PARAMS.space_id, "related_job_ids": ["job-2"]},
+        }
+        failure = ToolResult(False, "conflict_check", "SPACE_UNAVAILABLE", details=details)
+        self.job.transition("CANCELLED", checks=(failure,))
+
+        details["conflict"]["space_id"] = "other"
+        details["conflict"]["related_job_ids"].append("job-3")
+
+        saved = self.job.history[-1].details["conflict"]
+        self.assertEqual(saved["space_id"], PARAMS.space_id)
+        self.assertEqual(saved["related_job_ids"], ("job-2",))
+        with self.assertRaises(TypeError):
+            saved["space_id"] = "changed through history"
 
     def test_owner_or_admin_can_cancel_and_repeat_preserves_history(self):
         self.job.transition("CONFIRMED", checks=PASSED)
