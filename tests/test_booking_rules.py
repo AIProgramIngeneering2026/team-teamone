@@ -1,6 +1,9 @@
-from dataclasses import replace
-from datetime import datetime, timedelta, timezone
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone, tzinfo
+from threading import Barrier
+from unittest.mock import patch
 
 from campusspot.access_rights import AccessRightsTool
 from campusspot.booking import BookingService, InMemoryJobRepository
@@ -9,6 +12,18 @@ from campusspot.dispatcher import Dispatcher, ValidationError
 from campusspot.limit_check import FixedClock, LimitCheckTool
 from campusspot.registry import Registry
 from campusspot.tool_contract import ToolParams, ToolResult
+
+
+class RepeatedHour(tzinfo):
+    """Два смещения для повторяющегося часа без системной базы часовых поясов."""
+
+    def utcoffset(self, value):
+        return timedelta(hours=1 if value is not None and value.fold else 2)
+
+
+FOLD_NOW = datetime(2026, 10, 25, tzinfo=timezone.utc)
+FOLD_START = datetime(2026, 10, 25, 2, 10, tzinfo=RepeatedHour())
+FOLD_END = FOLD_START.replace(minute=40)
 
 
 NOW = datetime(2026, 11, 23, 9, tzinfo=timezone.utc)
@@ -129,6 +144,65 @@ class BookingServiceTests(unittest.TestCase):
         job.cancel(user_id=PARAMS.user_id, role=PARAMS.role)
         new_job = self.service.create(fields(replace(PARAMS, job_id="after-cancellation")))
         self.assertEqual(new_job.status, "CONFIRMED")
+
+    def test_concurrent_requests_cannot_confirm_the_same_space(self):
+        both_read = Barrier(2)
+        get_bookings = InMemoryJobRepository.get_bookings_for_space
+
+        def read_then_wait(repository, space_id):
+            bookings = get_bookings(repository, space_id)
+            both_read.wait(timeout=5)
+            return bookings
+
+        second = replace(PARAMS, job_id="other-job", user_id="other-user")
+        with patch.object(InMemoryJobRepository, "get_bookings_for_space", read_then_wait):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(self.service.create, fields(params))
+                    for params in (PARAMS, second)
+                ]
+                jobs = [future.result(timeout=10) for future in futures]
+
+        self.assertCountEqual([job.status for job in jobs], ["CONFIRMED", "CANCELLED"])
+        confirmed = next(job for job in jobs if job.status == "CONFIRMED")
+        cancelled = next(job for job in jobs if job.status == "CANCELLED")
+        self.assertEqual(cancelled.history[-2], ToolResult(True, "conflict_check"))
+        self.assertEqual(cancelled.history[-1].error_code, "SPACE_UNAVAILABLE")
+        self.assertEqual(cancelled.history[-1].details["conflicting_job_id"], confirmed.job_id)
+
+    def test_repeated_local_time_is_compared_by_actual_booking_instants(self):
+        service = BookingService(FixedClock(FOLD_NOW))
+        first = replace(PARAMS, start_time=FOLD_START, end_time=FOLD_END)
+        second = replace(
+            first,
+            job_id="after-clock-change",
+            start_time=FOLD_START.replace(fold=1),
+            end_time=FOLD_END.replace(fold=1),
+        )
+
+        confirmed = service.create(fields(first))
+        later = service.create(fields(second))
+
+        self.assertEqual(confirmed.status, "CONFIRMED")
+        self.assertEqual(later.status, "CONFIRMED")
+        self.assertEqual(later.params.start_time.fold, 1)
+        self.assertIs(later.params.start_time.tzinfo, FOLD_START.tzinfo)
+
+    def test_repeated_local_time_is_compared_by_actual_schedule_instants(self):
+        schedule = InMemoryScheduleSource([
+            ScheduleSlot(PARAMS.space_id, FOLD_START, FOLD_END)
+        ])
+        params = replace(
+            PARAMS,
+            role="teacher",
+            space_category="classroom",
+            start_time=FOLD_START.replace(fold=1),
+            end_time=FOLD_END.replace(fold=1),
+        )
+
+        result = BookingService(FixedClock(FOLD_NOW), schedule=schedule).create(fields(params))
+
+        self.assertEqual(result.status, "CONFIRMED")
 
     def test_room_schedule_conflict_retains_details(self):
         params = replace(PARAMS, role="teacher", space_category="classroom")
