@@ -141,6 +141,8 @@ paths:
         Создание, проверки и уведомление о подтверждении при таком повторе не выполняются.
         Тело содержит только поля бронирования. Поля user_id, role и status
         отклоняются с 400 VALIDATION_ERROR.
+        Если имя обязательной проверки из конфигурации отсутствует в реестре,
+        операция завершается с 400 UNKNOWN_OPERATION до создания брони.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -170,7 +172,7 @@ paths:
         '409': {$ref: '#/components/responses/CreateConflict'}
         '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMediaType'}
-        '422': {$ref: '#/components/responses/BookingLimitExceeded'}
+        '422': {$ref: '#/components/responses/InvalidBookingTime'}
         '503': {$ref: '#/components/responses/ScheduleUnavailable'}
         default: {$ref: '#/components/responses/UnexpectedError'}
 
